@@ -76,6 +76,8 @@ Future support planned for:
 
 ## Privacy & Security
 
+See [PRIVACY.md](PRIVACY.md) for the full privacy policy.
+
 - **PATs are encrypted** using AES-256-GCM with PBKDF2 key derivation before storage
 - **Data stays local** - All data is stored in your browser's local storage
 - **No external servers** - The extension only communicates with Azure DevOps APIs
