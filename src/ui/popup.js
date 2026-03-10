@@ -27,9 +27,6 @@ const elements = {
   loadingState: document.getElementById('loading-state'),
   filterOrg: document.getElementById('filter-org'),
   markAllReadBtn: document.getElementById('mark-all-read-btn'),
-  authErrorBanner: document.getElementById('auth-error-banner'),
-  authErrorSettingsBtn: document.getElementById('auth-error-settings-btn'),
-
   // Header
   unreadBadge: document.getElementById('unread-badge'),
   refreshBtn: document.getElementById('refresh-btn'),
@@ -88,7 +85,6 @@ async function loadState() {
     updateUnreadBadge();
     updateLastUpdated();
     updateNotificationsToggle();
-    updateAuthErrorBanner();
 
     // Show appropriate empty state
     if (currentState.organizations.length === 0) {
@@ -282,16 +278,6 @@ function updateNotificationsToggle() {
   elements.notificationsToggle.checked = currentState.preferences.notificationsEnabled;
 }
 
-function updateAuthErrorBanner() {
-  const orgsWithErrors = currentState.organizations.filter(org => org.lastError);
-
-  if (orgsWithErrors.length > 0) {
-    elements.authErrorBanner.classList.remove('hidden');
-  } else {
-    elements.authErrorBanner.classList.add('hidden');
-  }
-}
-
 // =============================================================================
 // Event Handlers
 // =============================================================================
@@ -365,11 +351,6 @@ function setupEventListeners() {
     if (elements.lastUpdated.classList.contains('clickable')) {
       toggleView('config');
     }
-  });
-
-  // Auth error banner Fix button
-  elements.authErrorSettingsBtn.addEventListener('click', () => {
-    toggleView('config');
   });
 
   // Back to mentions

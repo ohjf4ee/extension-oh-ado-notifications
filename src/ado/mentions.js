@@ -299,11 +299,17 @@ export async function detectWorkItemMentions(apiClient) {
 export async function detectWorkItemAssignments(apiClient, lastCheckTime = null) {
   const currentUser = await apiClient.getCurrentUser();
 
-  // On first run, look back 2 days; otherwise check recent changes
-  const cutoffDays = lastCheckTime ? 0 : 2;
-  const sinceClause = lastCheckTime
-    ? `AND [System.ChangedDate] >= '${lastCheckTime}'`
-    : `AND [System.ChangedDate] >= @Today - ${cutoffDays}`;
+  // Build the date filter clause
+  // WIQL only accepts date-only values (no time), so convert ISO timestamp to date
+  let sinceClause;
+  if (lastCheckTime) {
+    // Extract just the date portion (YYYY-MM-DD) from ISO timestamp
+    const dateOnly = lastCheckTime.split('T')[0];
+    sinceClause = `AND [System.ChangedDate] >= '${dateOnly}'`;
+  } else {
+    // On first run, look back 2 days
+    sinceClause = `AND [System.ChangedDate] >= @Today - 2`;
+  }
 
   const wiql = `
     SELECT [System.Id], [System.Title], [System.TeamProject],
