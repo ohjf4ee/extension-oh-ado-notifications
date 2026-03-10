@@ -22,7 +22,7 @@ export const DEFAULT_PREFERENCES = {
 
 // API configuration
 export const API_CONFIG = {
-  version: '7.1',
+  version: '7.1-preview',
   maxWorkItemsPerBatch: 200,
   maxMentionsToStore: 500,
 };
@@ -42,9 +42,11 @@ export const ALARM_PREFIX = 'poll_';
 export const MESSAGE_TYPES = {
   // State queries
   GET_STATE: 'GET_STATE',
+  POPUP_OPENED: 'POPUP_OPENED',
 
   // Mention actions
   MARK_AS_READ: 'MARK_AS_READ',
+  MARK_AS_UNREAD: 'MARK_AS_UNREAD',
   MARK_ALL_READ: 'MARK_ALL_READ',
   REFRESH_NOW: 'REFRESH_NOW',
 

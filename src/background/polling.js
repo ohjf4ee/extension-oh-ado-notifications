@@ -48,7 +48,7 @@ export async function schedulePolling() {
     }
   }
 
-  // Schedule alarm for each enabled org
+  // Schedule alarm for each enabled org and poll immediately
   for (const org of state.organizations) {
     if (!org.enabled) {
       continue;
@@ -57,12 +57,17 @@ export async function schedulePolling() {
     const alarmName = getAlarmName(org.orgUrl);
     const intervalMinutes = org.pollIntervalMinutes || POLLING_CONFIG.defaultIntervalMinutes;
 
+    // Schedule recurring alarm (first alarm fires after periodInMinutes)
     await chrome.alarms.create(alarmName, {
-      delayInMinutes: 0.5, // First poll in 30 seconds
       periodInMinutes: Math.max(intervalMinutes, POLLING_CONFIG.minIntervalMinutes),
     });
 
     console.log(`Scheduled polling for ${org.orgName} every ${intervalMinutes} min`);
+
+    // Poll immediately on startup (don't wait for first alarm)
+    pollOrganization(org).catch(err => {
+      console.error(`Initial poll failed for ${org.orgName}:`, err);
+    });
   }
 }
 

@@ -41,15 +41,20 @@ export function parseMentionId(id) {
  */
 export function commentMentionsUser(html, currentUser) {
   if (!html || !currentUser) {
+    console.log('commentMentionsUser: missing html or currentUser', { html: !!html, currentUser: !!currentUser });
     return false;
   }
 
   // Check for data-vss-mention attribute with user ID
-  const mentionPattern = /data-vss-mention="[^"]*id:([^",\s]+)/gi;
+  // Format can be either:
+  //   data-vss-mention="version:2.0,{guid}" (newer format)
+  //   data-vss-mention="version:2.0,id:{guid}" (older format with id: prefix)
+  const mentionPattern = /data-vss-mention="version:[^,]*,(?:id:)?([^"]+)"/gi;
   let match;
 
   while ((match = mentionPattern.exec(html)) !== null) {
     const mentionedUserId = match[1];
+    console.log('Found mention ID in HTML:', mentionedUserId, 'comparing to user.id:', currentUser.id, 'user.publicAlias:', currentUser.publicAlias);
     if (mentionedUserId === currentUser.id ||
         mentionedUserId === currentUser.publicAlias) {
       return true;
@@ -62,14 +67,17 @@ export function commentMentionsUser(html, currentUser) {
     currentUser.emailAddress,
     currentUser.publicAlias,
   ].filter(Boolean);
+  console.log('Checking fallback patterns:', userPatterns);
 
   const lowerHtml = html.toLowerCase();
   for (const pattern of userPatterns) {
     if (pattern && lowerHtml.includes(`@${pattern.toLowerCase()}`)) {
+      console.log('Found fallback match for pattern:', pattern);
       return true;
     }
   }
 
+  console.log('No mention found for user');
   return false;
 }
 
@@ -113,15 +121,46 @@ export function buildWorkItemCommentUrl(orgUrl, projectName, workItemId, comment
 }
 
 /**
+ * Checks if a comment was created by the current user.
+ */
+function isCommentByUser(comment, currentUser) {
+  if (!comment.createdBy) return false;
+
+  // Check by user ID
+  if (comment.createdBy.id === currentUser.id) return true;
+
+  // Check by uniqueName (email)
+  if (currentUser.emailAddress &&
+      comment.createdBy.uniqueName?.toLowerCase() === currentUser.emailAddress.toLowerCase()) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
  * Extracts mentions from a work item's comments.
  */
 async function extractMentionsFromWorkItem(apiClient, workItem, currentUser) {
   const projectName = workItem.fields['System.TeamProject'];
+  console.log(`Fetching comments for work item ${workItem.id} in project ${projectName}`);
   const comments = await apiClient.getWorkItemComments(projectName, workItem.id);
+  console.log(`Work item ${workItem.id} has ${comments.length} comments`);
   const mentions = [];
 
   for (const comment of comments) {
-    if (commentMentionsUser(comment.text, currentUser)) {
+    console.log(`Checking comment ${comment.id} by ${comment.createdBy?.displayName}:`, comment.text?.substring(0, 200));
+    const isMention = commentMentionsUser(comment.text, currentUser);
+    console.log(`Comment ${comment.id} mentions user: ${isMention}`);
+    if (isMention) {
+      const mentionTimestamp = new Date(comment.createdDate).getTime();
+
+      // Check if current user has commented after this mention
+      const userCommentedAfter = comments.some(c => {
+        if (!isCommentByUser(c, currentUser)) return false;
+        const commentTime = new Date(c.createdDate).getTime();
+        return commentTime > mentionTimestamp;
+      });
 
       mentions.push({
         id: createMentionId(apiClient.orgUrl, 'workitem', workItem.id, comment.id),
@@ -142,6 +181,7 @@ async function extractMentionsFromWorkItem(apiClient, workItem, currentUser) {
         },
         timestamp: comment.createdDate,
         url: buildWorkItemCommentUrl(apiClient.orgUrl, projectName, workItem.id, comment.id),
+        userCommentedAfter,
       });
     }
   }
@@ -158,6 +198,7 @@ async function extractMentionsFromWorkItem(apiClient, workItem, currentUser) {
 export async function detectWorkItemMentions(apiClient) {
   // Get current user for mention matching
   const currentUser = await apiClient.getCurrentUser();
+  console.log('Current user for mention detection:', currentUser);
 
   // Query for work items where user was mentioned
   const wiql = `
@@ -167,14 +208,18 @@ export async function detectWorkItemMentions(apiClient) {
     ORDER BY [System.ChangedDate] DESC
   `;
 
+  console.log('Executing WIQL query for @recentMentions...');
   const workItemRefs = await apiClient.executeWiql(wiql);
+  console.log('WIQL returned work items:', workItemRefs.length, workItemRefs);
 
   if (workItemRefs.length === 0) {
+    console.log('No work items found with @recentMentions');
     return [];
   }
 
   // Batch fetch work item details
   const workItemIds = workItemRefs.map(wi => wi.id);
+  console.log('Fetching work item details for IDs:', workItemIds);
 
   // Handle batching if more than max per request
   const allWorkItems = [];
@@ -187,8 +232,10 @@ export async function detectWorkItemMentions(apiClient) {
       'System.ChangedDate',
       'System.WorkItemType',
     ]);
+    console.log('Batch fetch returned', batchItems.length, 'work items:', batchItems.map(wi => ({ id: wi.id, title: wi.fields?.['System.Title'] })));
     allWorkItems.push(...batchItems);
   }
+  console.log('Total work items fetched:', allWorkItems.length);
 
   // Extract mentions from each work item's comments
   const allMentions = [];

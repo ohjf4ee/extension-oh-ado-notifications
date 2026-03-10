@@ -10,7 +10,7 @@
 
 import { schedulePolling, setupAlarmHandler } from './polling.js';
 import { setupMessageHandler } from './messages.js';
-import { setupNotificationClickHandler, updateBadge } from './notifications.js';
+import { setupNotificationClickHandler, setupBlinkAlarmHandler, updateBadge, stopBadgeBlink } from './notifications.js';
 import { loadState } from './state.js';
 
 /**
@@ -24,6 +24,8 @@ export function initializeBackgroundService() {
   setupAlarmHandler();
   setupMessageHandler();
   setupNotificationClickHandler();
+  setupBlinkAlarmHandler();
+
 
   // Handle extension install/update
   chrome.runtime.onInstalled.addListener(async (details) => {

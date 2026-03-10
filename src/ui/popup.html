@@ -33,6 +33,15 @@
     <main class="popup-main">
       <!-- Mention list view (default) -->
       <section id="mentions-view" class="view active">
+        <!-- Auth error banner -->
+        <div id="auth-error-banner" class="auth-error-banner hidden">
+          <div class="auth-error-content">
+            <span class="auth-error-icon">⚠</span>
+            <span class="auth-error-text">Authentication failed for one or more organizations. Check settings.</span>
+          </div>
+          <button id="auth-error-settings-btn" class="auth-error-action">Fix</button>
+        </div>
+
         <div class="list-controls">
           <select id="filter-org" title="Filter by organization">
             <option value="">All organizations</option>
@@ -106,7 +115,7 @@
             <label for="org-pat">Personal Access Token</label>
             <input type="password" id="org-pat" required>
             <p class="hint">
-              <a href="#" id="create-pat-link" class="link">Create a PAT</a> with "Work Items: Read" scope
+              <a href="#" id="create-pat-link" class="link">Create a PAT</a> with Work Items (Read) scope
             </p>
           </div>
           <div class="form-group">

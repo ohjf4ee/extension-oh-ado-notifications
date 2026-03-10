@@ -97,8 +97,12 @@ export class AdoApiClient {
   constructor(orgUrl, pat) {
     this.orgUrl = normalizeOrgUrl(orgUrl);
     this.orgName = extractOrgName(this.orgUrl);
-    this.authHeader = 'Basic ' + btoa(':' + pat);
+    // Trim whitespace from PAT (common copy-paste issue)
+    const cleanPat = pat.trim();
+    this.authHeader = 'Basic ' + btoa(':' + cleanPat);
     this.retryAfterUntil = 0;
+    console.log('AdoApiClient created for:', this.orgUrl);
+    console.log('PAT length:', cleanPat.length);
   }
 
   /**
@@ -123,6 +127,12 @@ export class AdoApiClient {
 
     if (!response.ok) {
       const errorText = await response.text();
+      console.error('API request failed:', {
+        url,
+        status: response.status,
+        statusText: response.statusText,
+        body: errorText.substring(0, 500),
+      });
       throw new AdoApiError(response.status, errorText, endpoint);
     }
 
@@ -200,11 +210,22 @@ export class AdoApiClient {
   // ===========================================================================
 
   /**
-   * Gets the authenticated user's profile.
-   * Note: Uses app.vssps.visualstudio.com (the global profile service), not dev.azure.com.
+   * Gets the authenticated user's info from the org's connection data.
+   * Note: Uses the org-scoped connectionData endpoint which works with org-scoped PATs,
+   * unlike the global profile endpoint at app.vssps.visualstudio.com.
    */
   async getCurrentUser() {
-    return this.fetch(`https://app.vssps.visualstudio.com/_apis/profile/profiles/me?api-version=${API_CONFIG.version}`);
+    const connectionData = await this.fetch(`/_apis/connectionData`);
+    const user = connectionData.authenticatedUser || {};
+    console.log('connectionData.authenticatedUser:', JSON.stringify(user, null, 2));
+    const result = {
+      displayName: user.providerDisplayName || user.customDisplayName || '',
+      emailAddress: user.properties?.Account?.$value || '',
+      id: user.id || '',
+      publicAlias: user.publicAlias || '',
+    };
+    console.log('getCurrentUser result:', result);
+    return result;
   }
 
   /**
@@ -212,23 +233,44 @@ export class AdoApiClient {
    */
   async validateConnection() {
     try {
-      const user = await this.getCurrentUser();
-      const projects = await this.fetch(`/_apis/projects?$top=1&api-version=${API_CONFIG.version}`);
+      // Use the org-scoped connection info endpoint
+      // This works with org-scoped PATs (unlike the global profile endpoint)
+      // Note: connectionData endpoint doesn't need api-version parameter
+      const connectionData = await this.fetch(`/_apis/connectionData`);
+
+      // Extract user info from connectionData
+      const authenticatedUser = connectionData.authenticatedUser || {};
 
       return {
         valid: true,
         user: {
-          displayName: user.displayName,
-          emailAddress: user.emailAddress,
-          id: user.id,
-          publicAlias: user.publicAlias,
+          displayName: authenticatedUser.providerDisplayName || authenticatedUser.customDisplayName || this.orgName,
+          emailAddress: authenticatedUser.properties?.Account?.$value || '',
+          id: authenticatedUser.id || '',
+          publicAlias: authenticatedUser.publicAlias || '',
         },
-        hasProjects: projects.count > 0,
       };
     } catch (error) {
+      console.error('validateConnection failed:', error);
+      console.error('Org URL:', this.orgUrl);
+      console.error('Error status:', error.status);
+      console.error('Error endpoint:', error.endpoint);
+
+      // Build detailed error info for display
+      let details = '';
+      if (error instanceof AdoApiError) {
+        details = `Status: ${error.status}`;
+        if (error.endpoint) {
+          details += ` | Endpoint: ${error.endpoint}`;
+        }
+      } else if (error.message) {
+        details = error.message;
+      }
+
       return {
         valid: false,
         error: getUserFriendlyError(error),
+        details: details,
       };
     }
   }

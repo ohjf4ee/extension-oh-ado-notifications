@@ -27,6 +27,8 @@ const elements = {
   loadingState: document.getElementById('loading-state'),
   filterOrg: document.getElementById('filter-org'),
   markAllReadBtn: document.getElementById('mark-all-read-btn'),
+  authErrorBanner: document.getElementById('auth-error-banner'),
+  authErrorSettingsBtn: document.getElementById('auth-error-settings-btn'),
 
   // Header
   unreadBadge: document.getElementById('unread-badge'),
@@ -61,6 +63,9 @@ const elements = {
 // =============================================================================
 
 document.addEventListener('DOMContentLoaded', async () => {
+  // Notify background that popup opened (stops badge blinking)
+  chrome.runtime.sendMessage({ type: MESSAGE_TYPES.POPUP_OPENED });
+
   await loadState();
   setupEventListeners();
 });
@@ -83,6 +88,7 @@ async function loadState() {
     updateUnreadBadge();
     updateLastUpdated();
     updateNotificationsToggle();
+    updateAuthErrorBanner();
 
     // Show appropriate empty state
     if (currentState.organizations.length === 0) {
@@ -139,12 +145,24 @@ function renderMentions() {
 }
 
 function renderMentionItem(mention, isRead) {
+  const youCommentedIndicator = mention.userCommentedAfter
+    ? `<span class="mention-replied-indicator" title="You commented on this item after being mentioned">
+        <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm3.854 5.354-4.5 4.5a.5.5 0 0 1-.708 0l-2-2a.5.5 0 1 1 .708-.708L7 9.793l4.146-4.147a.5.5 0 0 1 .708.708z"/></svg>
+        You commented
+      </span>`
+    : '';
+
+  const actionButton = isRead
+    ? `<button class="mark-unread-btn icon-btn" title="Mark as unread" data-id="${escapeHtml(mention.id)}">○</button>`
+    : `<button class="mark-read-btn icon-btn" title="Mark as read" data-id="${escapeHtml(mention.id)}">✓</button>`;
+
   return `
     <article class="mention-item ${isRead ? '' : 'unread'}" data-id="${escapeHtml(mention.id)}" data-url="${escapeHtml(mention.url)}">
       <div class="mention-unread-indicator"></div>
       <div class="mention-content">
         <div class="mention-header">
           <span class="mention-author">${escapeHtml(mention.mentionedBy.displayName)}</span>
+          ${youCommentedIndicator}
           <span class="mention-time" title="${escapeHtml(mention.timestamp)}">
             ${formatRelativeTime(mention.timestamp)}
           </span>
@@ -160,9 +178,7 @@ function renderMentionItem(mention, isRead) {
         </div>
       </div>
       <div class="mention-actions">
-        <button class="mark-read-btn icon-btn" title="Mark as read" data-id="${escapeHtml(mention.id)}">
-          ✓
-        </button>
+        ${actionButton}
       </div>
     </article>
   `;
@@ -189,13 +205,21 @@ function renderOrgList() {
   }
 
   elements.orgList.innerHTML = orgs
-    .map(org => `
-      <div class="org-card" data-url="${escapeHtml(org.orgUrl)}">
+    .map(org => {
+      const isAuthError = org.lastError && org.lastError.includes('Authentication failed');
+      const statusClass = isAuthError ? 'auth-error' : (org.lastError ? 'error' : '');
+      const statusText = org.lastError
+        ? escapeHtml(org.lastError)
+        : (org.enabled ? 'Active' : 'Disabled');
+
+      return `
+      <div class="org-card ${isAuthError ? 'has-auth-error' : ''}" data-url="${escapeHtml(org.orgUrl)}">
         <div class="org-info">
-          <span class="org-name">${escapeHtml(org.orgName)}</span>
-          <span class="org-status ${org.lastError ? 'error' : ''}">
-            ${org.lastError ? escapeHtml(org.lastError) : (org.enabled ? 'Active' : 'Disabled')}
-          </span>
+          <div class="org-name-row">
+            ${isAuthError ? '<span class="org-error-icon">⚠</span>' : ''}
+            <span class="org-name">${escapeHtml(org.orgName)}</span>
+          </div>
+          <span class="org-status ${statusClass}">${statusText}</span>
         </div>
         <div class="org-actions">
           <button class="icon-btn toggle-org-btn" title="${org.enabled ? 'Disable' : 'Enable'}">
@@ -204,7 +228,8 @@ function renderOrgList() {
           <button class="icon-btn remove-org-btn" title="Remove">✕</button>
         </div>
       </div>
-    `)
+    `;
+    })
     .join('');
 }
 
@@ -235,6 +260,18 @@ function updateNotificationsToggle() {
   elements.notificationsToggle.checked = currentState.preferences.notificationsEnabled;
 }
 
+function updateAuthErrorBanner() {
+  const orgsWithAuthErrors = currentState.organizations.filter(org =>
+    org.lastError && org.lastError.includes('Authentication failed')
+  );
+
+  if (orgsWithAuthErrors.length > 0) {
+    elements.authErrorBanner.classList.remove('hidden');
+  } else {
+    elements.authErrorBanner.classList.add('hidden');
+  }
+}
+
 // =============================================================================
 // Event Handlers
 // =============================================================================
@@ -242,8 +279,8 @@ function updateNotificationsToggle() {
 function setupEventListeners() {
   // Mention item click → open URL
   elements.mentionsList.addEventListener('click', async (e) => {
-    // Ignore if clicking the mark-read button
-    if (e.target.closest('.mark-read-btn')) {
+    // Ignore if clicking the mark-read/unread buttons
+    if (e.target.closest('.mark-read-btn') || e.target.closest('.mark-unread-btn')) {
       return;
     }
 
@@ -269,6 +306,15 @@ function setupEventListeners() {
     await markAsRead(btn.dataset.id);
   });
 
+  // Mark unread button click
+  elements.mentionsList.addEventListener('click', async (e) => {
+    const btn = e.target.closest('.mark-unread-btn');
+    if (!btn) return;
+
+    e.stopPropagation();
+    await markAsUnread(btn.dataset.id);
+  });
+
   // Mark all read
   elements.markAllReadBtn.addEventListener('click', async () => {
     await chrome.runtime.sendMessage({ type: MESSAGE_TYPES.MARK_ALL_READ });
@@ -291,6 +337,11 @@ function setupEventListeners() {
 
   // Settings toggle
   elements.settingsBtn.addEventListener('click', () => {
+    toggleView('config');
+  });
+
+  // Auth error banner Fix button
+  elements.authErrorSettingsBtn.addEventListener('click', () => {
     toggleView('config');
   });
 
@@ -401,6 +452,21 @@ async function markAsRead(mentionId) {
   updateUnreadBadge();
 }
 
+async function markAsUnread(mentionId) {
+  await chrome.runtime.sendMessage({
+    type: MESSAGE_TYPES.MARK_AS_UNREAD,
+    mentionId,
+  });
+
+  // Update local state
+  const index = currentState.readIds.indexOf(mentionId);
+  if (index > -1) {
+    currentState.readIds.splice(index, 1);
+  }
+  renderMentions();
+  updateUnreadBadge();
+}
+
 async function handleOrgFormSubmit(e) {
   e.preventDefault();
 
@@ -419,7 +485,11 @@ async function handleOrgFormSubmit(e) {
     });
 
     if (!result.valid) {
-      setOrgStatus(result.error || 'Invalid credentials', 'error');
+      let errorMsg = result.error || 'Invalid credentials';
+      if (result.details) {
+        errorMsg += `\n(${result.details})`;
+      }
+      setOrgStatus(errorMsg, 'error');
       elements.saveOrgBtn.disabled = false;
       return;
     }

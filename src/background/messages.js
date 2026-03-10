@@ -13,7 +13,7 @@ import {
   removeOrganization,
   clearAllData,
 } from './state.js';
-import { updateBadge } from './notifications.js';
+import { updateBadge, stopBadgeBlink } from './notifications.js';
 import { pollAllOrganizations, schedulePolling } from './polling.js';
 
 /**
@@ -38,8 +38,20 @@ export async function handleMessage(message, sender) {
         lastPoll: state.lastPoll,
       };
 
+    case MESSAGE_TYPES.POPUP_OPENED: {
+      stopBadgeBlink();
+      return { success: true };
+    }
+
     case MESSAGE_TYPES.MARK_AS_READ: {
       state.readIds.add(message.mentionId);
+      await saveReadIds(state.readIds);
+      await updateBadge();
+      return { success: true };
+    }
+
+    case MESSAGE_TYPES.MARK_AS_UNREAD: {
+      state.readIds.delete(message.mentionId);
       await saveReadIds(state.readIds);
       await updateBadge();
       return { success: true };
