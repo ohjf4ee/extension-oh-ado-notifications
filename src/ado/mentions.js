@@ -157,10 +157,12 @@ async function extractMentionsFromWorkItem(apiClient, workItem, currentUser) {
 
       // Check if current user has commented after this mention
       const userCommentedAfter = comments.some(c => {
-        if (!isCommentByUser(c, currentUser)) return false;
+        const isUserComment = isCommentByUser(c, currentUser);
         const commentTime = new Date(c.createdDate).getTime();
-        return commentTime > mentionTimestamp;
+        const isAfter = commentTime > mentionTimestamp;
+        return isUserComment && isAfter;
       });
+      console.log(`Mention ${comment.id}: userCommentedAfter=${userCommentedAfter}`);
 
       mentions.push({
         id: createMentionId(apiClient.orgUrl, 'workitem', workItem.id, comment.id),

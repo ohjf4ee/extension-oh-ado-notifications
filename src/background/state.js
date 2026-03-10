@@ -41,10 +41,15 @@ export function mergeMentions(existing, incoming) {
       // New mention
       existing.push(mention);
       added.push(mention);
-    } else if (mention.timestamp > existingMention.timestamp) {
-      // Updated mention (newer timestamp)
-      Object.assign(existingMention, mention);
-      updated.push(existingMention);
+    } else {
+      // Check if anything changed (timestamp or userCommentedAfter status)
+      const timestampChanged = mention.timestamp > existingMention.timestamp;
+      const userCommentedChanged = mention.userCommentedAfter !== existingMention.userCommentedAfter;
+
+      if (timestampChanged || userCommentedChanged) {
+        Object.assign(existingMention, mention);
+        updated.push(existingMention);
+      }
     }
   }
 
