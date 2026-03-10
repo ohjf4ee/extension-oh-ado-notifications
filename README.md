@@ -1,6 +1,6 @@
-# ADO @ Mention Notifications
+# ADO Notifications
 
-A browser extension that notifies you when someone @mentions you in Azure DevOps work item comments.
+A browser extension that notifies you of @mentions and assignments in Azure DevOps work items and pull requests.
 
 ![Manifest V3](https://img.shields.io/badge/Manifest-V3-blue)
 ![Edge](https://img.shields.io/badge/Edge-Compatible-green)
@@ -8,17 +8,17 @@ A browser extension that notifies you when someone @mentions you in Azure DevOps
 
 ## Features
 
-- **Badge notifications** - Unread mention count displayed on the extension icon
-- **Browser notifications** - Optional push notifications for new mentions (opt-in)
+- **Work item @mentions** - Notifications when someone @mentions you in work item comments
+- **Work item assignments** - Notifications when work items are assigned to you
+- **Pull request @mentions** - Notifications when someone @mentions you in PR comments (overview or file-level)
+- **Pull request reviewer assignments** - Notifications when you're added as a PR reviewer
+- **Badge notifications** - Unread notification count displayed on the extension icon
+- **Browser notifications** - Optional push notifications for new items (opt-in)
 - **Multi-organization support** - Monitor multiple Azure DevOps organizations
-- **Read tracking** - Mark mentions as read; state persists across sessions
+- **Read tracking** - Mark items as read; state persists across sessions
+- **Reply detection** - See when you've already replied to a mention
+- **Content script integration** - Automatically refreshes when you post comments in ADO
 - **Secure credential storage** - PATs encrypted with AES-256-GCM
-
-## Screenshots
-
-<!-- TODO: Add screenshots -->
-<!-- ![Popup showing mentions](docs/screenshot-popup.png) -->
-<!-- ![Settings panel](docs/screenshot-settings.png) -->
 
 ## Installation
 
@@ -27,7 +27,7 @@ A browser extension that notifies you when someone @mentions you in Azure DevOps
 1. Clone this repository:
 
    ```bash
-   git clone https://github.com/YOUR_USERNAME/extension-oh-ado-cmt-atsign-notifications.git
+   git clone https://github.com/ohjf4ee/extension-oh-ado-notifications.git
    ```
 
 2. Open your browser's extension management page:
@@ -46,33 +46,39 @@ A browser extension that notifies you when someone @mentions you in Azure DevOps
 2. Click the **Settings** (gear) icon
 3. Click **+ Add Organization**
 4. Enter your Azure DevOps organization URL (e.g., `https://dev.azure.com/myorg` or just `myorg`)
-5. Create a Personal Access Token (PAT) with **Work Items: Read** scope
+5. Create a Personal Access Token (PAT) with these scopes:
+   - **Work Items: Read** - Required for work item mentions and assignments
+   - **Code: Read** - Required for pull request mentions and reviewer assignments
    - Click the "Create a PAT" link for quick access to the token creation page
 6. Paste your PAT and check the consent box
 7. Click **Save**
 
-The extension will begin polling for @mentions immediately.
+The extension will begin polling for notifications immediately.
 
 ## How It Works
 
-The extension uses Azure DevOps' WIQL `@recentMentions` macro to query for work items where you've been mentioned in the last 30 days. It then fetches comments from those work items and identifies which ones contain @mentions of your user account.
+### Work Items
+
+- Uses Azure DevOps' WIQL `@recentMentions` macro to find work items where you've been mentioned in the last 30 days
+- Queries for work items assigned to you that changed recently
+- Fetches comments to identify specific @mentions of your user account
+
+### Pull Requests
+
+- Scans PRs where you are a reviewer or author
+- Checks comment threads for @mentions in both overview and file-level comments
+- Detects when you've been added as a reviewer
 
 ### Polling
 
-- Default poll interval: **5 minutes**
-- Configurable per organization
-- Respects ADO rate limits with automatic backoff
+- Default poll interval: **5 minutes** (configurable per organization)
+- Minimum interval: **1 minute**
+- Automatic backoff after consecutive failures
+- Respects ADO rate limits with automatic retry handling
 
-### Detection
+### Content Script
 
-Currently supports:
-
-- Work item comment @mentions
-
-Future support planned for:
-
-- Pull request comment @mentions
-- Discussion thread @mentions
+A content script runs on Azure DevOps pages to detect when you post comments, triggering an immediate refresh so mentions you've replied to update their status.
 
 ## Privacy & Security
 
@@ -87,7 +93,7 @@ See [PRIVACY.md](PRIVACY.md) for the full privacy policy.
 
 | Permission | Purpose |
 | ---------- | ------- |
-| `storage` | Store encrypted credentials and mention history |
+| `storage` | Store encrypted credentials and notification history |
 | `alarms` | Schedule periodic polling |
 | `notifications` | Display browser notifications (optional feature) |
 | `host_permissions` | Access Azure DevOps APIs |
@@ -97,26 +103,29 @@ See [PRIVACY.md](PRIVACY.md) for the full privacy policy.
 ### Project Structure
 
 ```text
-├── manifest.json           # Extension manifest (MV3)
-├── background.js           # Service worker entry point
+├── manifest.json               # Extension manifest (MV3)
+├── background.js               # Service worker entry point
 ├── src/
-│   ├── config.js           # Configuration constants
-│   ├── storage.js          # Encrypted storage module
+│   ├── config.js               # Configuration constants
+│   ├── storage.js              # Encrypted storage module
 │   ├── ado/
-│   │   ├── api-client.js   # Azure DevOps REST API client
-│   │   └── mentions.js     # Mention detection logic
+│   │   ├── api-client.js       # Azure DevOps REST API client
+│   │   ├── index.js            # ADO module exports
+│   │   └── mentions.js         # Mention/assignment detection logic
 │   ├── background/
-│   │   ├── index.js        # Background service initialization
-│   │   ├── polling.js      # Polling scheduler
-│   │   ├── messages.js     # Message handling
-│   │   ├── notifications.js# Badge and push notifications
-│   │   └── state.js        # State management
+│   │   ├── index.js            # Background service initialization
+│   │   ├── polling.js          # Polling scheduler
+│   │   ├── messages.js         # Message handling
+│   │   ├── notifications.js    # Badge and push notifications
+│   │   └── state.js            # State management
+│   ├── content/
+│   │   └── comment-observer.js # DOM observer for comment submissions
 │   └── ui/
-│       ├── popup.html      # Popup UI markup
-│       ├── popup.css       # Popup styles
-│       └── popup.js        # Popup logic
-├── icons/                  # Extension icons
-└── design/                 # Architecture documentation
+│       ├── popup.html          # Popup UI markup
+│       ├── popup.css           # Popup styles
+│       └── popup.js            # Popup logic
+├── icons/                      # Extension icons
+└── design/                     # Architecture documentation
 ```
 
 ### Building
@@ -135,12 +144,12 @@ No build step required. The extension runs directly from source.
 ### "Authentication failed" error
 
 - Verify your PAT has not expired
-- Ensure the PAT has **Work Items: Read** scope
+- Ensure the PAT has **Work Items: Read** and **Code: Read** scopes
 - Check that the organization URL is correct
 
-### No mentions appearing
+### No notifications appearing
 
-- Confirm you have been @mentioned in a work item comment within the last 30 days
+- Confirm you have been @mentioned or assigned a work item/PR recently
 - Click the refresh button to force an immediate poll
 - Check the browser console for errors (right-click extension icon → Inspect)
 
@@ -149,18 +158,13 @@ No build step required. The extension runs directly from source.
 - Check that the organization is enabled in Settings
 - The service worker may have been suspended; clicking the extension icon will wake it
 
-## Contributing
+### PR mentions not detected
 
-Contributions are welcome! Please:
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Submit a pull request
+- Ensure your PAT has the **Code: Read** scope
+- PR mentions are only detected for PRs where you are a reviewer or author
 
 ## License
 
-<!-- TODO: Add license -->
 This project is not yet licensed. All rights reserved.
 
 ## Acknowledgments
