@@ -11,7 +11,7 @@
 import { schedulePolling, setupAlarmHandler } from './polling.js';
 import { setupMessageHandler } from './messages.js';
 import { setupNotificationClickHandler, setupBlinkAlarmHandler, updateBadge, stopBadgeBlink } from './notifications.js';
-import { loadState } from './state.js';
+import { loadState, runAssignmentDetectionMigration } from './state.js';
 
 /**
  * Initializes the background service.
@@ -31,6 +31,9 @@ export function initializeBackgroundService() {
   chrome.runtime.onInstalled.addListener(async (details) => {
     console.log('ADO Notifications: Extension installed/updated', details.reason);
 
+    // Run any pending one-time migrations before scheduling polls.
+    await runAssignmentDetectionMigration();
+
     // Initialize badge
     await updateBadge();
 
@@ -41,6 +44,9 @@ export function initializeBackgroundService() {
   // Handle browser startup
   chrome.runtime.onStartup.addListener(async () => {
     console.log('ADO Notifications: Browser started');
+
+    // Run any pending one-time migrations before scheduling polls.
+    await runAssignmentDetectionMigration();
 
     // Restore badge state
     await updateBadge();

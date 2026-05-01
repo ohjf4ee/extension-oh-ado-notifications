@@ -15,7 +15,7 @@ import {
   getPollState,
   updateLastPRPoll,
   savePRThreadCache,
-  updateLastAssignmentCheck,
+  saveAssignedWorkItemIds,
 } from './state.js';
 import { updateBadge, dispatchNotifications } from './notifications.js';
 
@@ -123,7 +123,7 @@ export async function pollOrganization(org) {
       includeAssignments: true,
       lastPRPollTime: pollState.lastPRPollTime,
       prThreadCache: pollState.prThreadCache,
-      lastAssignmentCheckTime: pollState.lastAssignmentCheckTime,
+      previousAssignedIds: pollState.assignedWorkItemIds,
     });
 
     // Load current state and merge mentions
@@ -135,7 +135,11 @@ export async function pollOrganization(org) {
 
     // Update timestamps
     await updateLastPoll(org.orgUrl, Date.now());
-    await updateLastAssignmentCheck(org.orgUrl, new Date().toISOString());
+
+    // Persist the new assigned-work-item set so the next poll can diff against it.
+    if (result.assignmentResult) {
+      await saveAssignedWorkItemIds(org.orgUrl, result.assignmentResult.newAssignedIds);
+    }
 
     // Update PR poll state if we polled PRs
     if (result.prResult) {

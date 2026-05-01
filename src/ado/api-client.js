@@ -357,6 +357,23 @@ export class AdoApiClient {
     return response.comments || [];
   }
 
+  /**
+   * Gets the revision history (updates) for a work item.
+   *
+   * Each update entry has `revisedDate`, `revisedBy`, and a `fields` map
+   * showing what changed. For example, an assignment change shows up as
+   * `fields["System.AssignedTo"]` with `oldValue` / `newValue` identity refs.
+   *
+   * @param {number} workItemId - Work item ID (org-scoped, no project needed)
+   * @returns {Promise<Array>} Update entries, oldest first
+   */
+  async getWorkItemUpdates(workItemId) {
+    const response = await this.fetch(
+      `/_apis/wit/workItems/${workItemId}/updates?api-version=${API_CONFIG.version}`
+    );
+    return response.value || [];
+  }
+
   // ===========================================================================
   // Pull Request API Methods
   // ===========================================================================

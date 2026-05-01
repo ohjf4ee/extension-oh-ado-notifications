@@ -269,20 +269,20 @@ export async function removeOrganization(orgUrl) {
   // Remove mentions from this org
   const filteredMentions = state.mentions.filter(m => m.orgUrl !== orgUrl);
 
-  // Load and clean PR-related storage
-  const prData = await chrome.storage.local.get([
+  // Load and clean per-org storage
+  const perOrgData = await chrome.storage.local.get([
     STORAGE_KEYS.LAST_PR_POLL,
     STORAGE_KEYS.PR_THREAD_CACHE,
-    STORAGE_KEYS.LAST_ASSIGNMENT_CHECK,
+    STORAGE_KEYS.ASSIGNED_WORK_ITEM_IDS,
   ]);
 
-  const lastPRPoll = prData[STORAGE_KEYS.LAST_PR_POLL] || {};
-  const prThreadCache = prData[STORAGE_KEYS.PR_THREAD_CACHE] || {};
-  const lastAssignmentCheck = prData[STORAGE_KEYS.LAST_ASSIGNMENT_CHECK] || {};
+  const lastPRPoll = perOrgData[STORAGE_KEYS.LAST_PR_POLL] || {};
+  const prThreadCache = perOrgData[STORAGE_KEYS.PR_THREAD_CACHE] || {};
+  const assignedIds = perOrgData[STORAGE_KEYS.ASSIGNED_WORK_ITEM_IDS] || {};
 
   delete lastPRPoll[orgUrl];
   delete prThreadCache[orgUrl];
-  delete lastAssignmentCheck[orgUrl];
+  delete assignedIds[orgUrl];
 
   await Promise.all([
     saveOrganizations(state.organizations),
@@ -291,7 +291,7 @@ export async function removeOrganization(orgUrl) {
       [STORAGE_KEYS.LAST_POLL]: state.lastPoll,
       [STORAGE_KEYS.LAST_PR_POLL]: lastPRPoll,
       [STORAGE_KEYS.PR_THREAD_CACHE]: prThreadCache,
-      [STORAGE_KEYS.LAST_ASSIGNMENT_CHECK]: lastAssignmentCheck,
+      [STORAGE_KEYS.ASSIGNED_WORK_ITEM_IDS]: assignedIds,
     }),
   ]);
 
@@ -319,26 +319,32 @@ export async function getDecryptedPat(orgUrl) {
 /**
  * Gets all poll-related state for an organization in a single storage read.
  * This is more efficient than calling getLastPRPoll, getPRThreadCache, and
- * getLastAssignmentCheck separately.
+ * getAssignedWorkItemIds separately.
  *
  * @param {string} orgUrl - Organization URL
- * @returns {Promise<{lastPRPollTime: string|null, prThreadCache: Object, lastAssignmentCheckTime: string|null}>}
+ * @returns {Promise<{lastPRPollTime: string|null, prThreadCache: Object, assignedWorkItemIds: number[]|null}>}
+ *   `assignedWorkItemIds` is `null` if the org has never been polled (signals first-poll silent seed).
  */
 export async function getPollState(orgUrl) {
   const data = await chrome.storage.local.get([
     STORAGE_KEYS.LAST_PR_POLL,
     STORAGE_KEYS.PR_THREAD_CACHE,
-    STORAGE_KEYS.LAST_ASSIGNMENT_CHECK,
+    STORAGE_KEYS.ASSIGNED_WORK_ITEM_IDS,
   ]);
 
   const lastPRPoll = data[STORAGE_KEYS.LAST_PR_POLL] || {};
   const threadCache = data[STORAGE_KEYS.PR_THREAD_CACHE] || {};
-  const lastAssignmentCheck = data[STORAGE_KEYS.LAST_ASSIGNMENT_CHECK] || {};
+  const assignedIds = data[STORAGE_KEYS.ASSIGNED_WORK_ITEM_IDS] || {};
 
   return {
     lastPRPollTime: lastPRPoll[orgUrl] || null,
     prThreadCache: threadCache[orgUrl] || {},
-    lastAssignmentCheckTime: lastAssignmentCheck[orgUrl] || null,
+    // Use Object.prototype.hasOwnProperty so an explicit empty array is preserved
+    // (empty array means "we polled and you're assigned to nothing"; null means
+    // "we've never polled this org, do a silent seed instead of notifying").
+    assignedWorkItemIds: Object.prototype.hasOwnProperty.call(assignedIds, orgUrl)
+      ? assignedIds[orgUrl]
+      : null,
   };
 }
 
@@ -367,17 +373,63 @@ export async function savePRThreadCache(orgUrl, prCache) {
 }
 
 // =============================================================================
-// Assignment Check State
+// Assignment Set State
 // =============================================================================
 
 /**
- * Updates the last assignment check timestamp for an organization.
+ * Saves the per-org set of currently-assigned work item IDs.
+ *
+ * @param {string} orgUrl - Organization URL
+ * @param {number[]} ids - Work item IDs the user is currently assigned to
  */
-export async function updateLastAssignmentCheck(orgUrl, timestamp) {
-  const data = await chrome.storage.local.get(STORAGE_KEYS.LAST_ASSIGNMENT_CHECK);
-  const lastCheck = data[STORAGE_KEYS.LAST_ASSIGNMENT_CHECK] || {};
-  lastCheck[orgUrl] = timestamp;
+export async function saveAssignedWorkItemIds(orgUrl, ids) {
+  const data = await chrome.storage.local.get(STORAGE_KEYS.ASSIGNED_WORK_ITEM_IDS);
+  const all = data[STORAGE_KEYS.ASSIGNED_WORK_ITEM_IDS] || {};
+  all[orgUrl] = ids;
   await chrome.storage.local.set({
-    [STORAGE_KEYS.LAST_ASSIGNMENT_CHECK]: lastCheck,
+    [STORAGE_KEYS.ASSIGNED_WORK_ITEM_IDS]: all,
   });
+}
+
+// =============================================================================
+// One-time migration
+// =============================================================================
+
+/**
+ * Runs the one-time migration to switch from the old date-filtered assignment
+ * detection to the set-based approach.
+ *
+ * - Wipes existing `subtype === 'assignment'` mentions (they have wrong/ratcheted
+ *   timestamps and authors that we can't recover).
+ * - Deletes the old `ado_last_assign` storage entry (no longer used).
+ * - Leaves `ASSIGNED_WORK_ITEM_IDS` unset so the next poll silently seeds without
+ *   firing notifications for assignments the user already had.
+ *
+ * Idempotent: a migration flag prevents repeat runs.
+ */
+export async function runAssignmentDetectionMigration() {
+  const data = await chrome.storage.local.get([
+    STORAGE_KEYS.ASSIGNMENT_MIGRATION_DONE,
+    STORAGE_KEYS.MENTIONS,
+  ]);
+
+  if (data[STORAGE_KEYS.ASSIGNMENT_MIGRATION_DONE]) {
+    return { ran: false };
+  }
+
+  const mentions = data[STORAGE_KEYS.MENTIONS] || [];
+  const filtered = mentions.filter(m => m.subtype !== 'assignment');
+  const removed = mentions.length - filtered.length;
+
+  await chrome.storage.local.set({
+    [STORAGE_KEYS.MENTIONS]: filtered,
+    [STORAGE_KEYS.ASSIGNMENT_MIGRATION_DONE]: true,
+  });
+
+  // Remove the dead `ado_last_assign` key (the old per-org "last assignment
+  // check time" map). Reference by literal so the constant can be deleted.
+  await chrome.storage.local.remove('ado_last_assign');
+
+  console.log(`Assignment detection migration: removed ${removed} legacy assignment mentions`);
+  return { ran: true, removed };
 }

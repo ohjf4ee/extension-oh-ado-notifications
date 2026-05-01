@@ -8,10 +8,10 @@ A browser extension that notifies you of @mentions and assignments in Azure DevO
 
 ## Features
 
-- **Work item @mentions** - Notifications when someone @mentions you in work item comments
-- **Work item assignments** - Notifications when work items are assigned to you
-- **Pull request @mentions** - Notifications when someone @mentions you in PR comments (overview or file-level)
-- **Pull request reviewer assignments** - Notifications when you're added as a PR reviewer
+- **Work item comment @mentions** - Notifications when someone @mentions you in a work item comment
+- **Work item assignments** - Notifications when a work item is assigned to you
+- **PR comment @mentions** - Notifications when someone @mentions you in a PR comment thread (overview or file-level)
+- **PR reviewer assignments** - Notifications when you're added as a reviewer on a PR
 - **Badge notifications** - Unread notification count displayed on the extension icon
 - **Browser notifications** - Optional push notifications for new items (opt-in)
 - **Multi-organization support** - Monitor multiple Azure DevOps organizations
@@ -19,6 +19,28 @@ A browser extension that notifies you of @mentions and assignments in Azure DevO
 - **Reply detection** - See when you've already replied to a mention
 - **Content script integration** - Automatically refreshes when you post comments in ADO
 - **Secure credential storage** - PATs encrypted with AES-256-GCM
+
+## Notification Types
+
+The extension produces four kinds of notification. They share a popup list and a single unread badge, but each has its own trigger and lifecycle.
+
+| Type | Triggered by | One notification per… | Timestamp represents | Attributed to |
+| ---- | ------------ | --------------------- | -------------------- | ------------- |
+| **Work item comment @mention** | Someone @mentions you in a work item comment | (work item, comment) — multiple mentions in the same item produce multiple notifications | When the comment was posted | The comment's author |
+| **Work item assignment** | A work item's `Assigned To` becomes you | Each "assigned to me" event — so an A → you → other → you sequence (with at least one poll in between transitions) produces two notifications | When the assignment was made | The person who made the assignment |
+| **PR comment @mention** | Someone @mentions you in a PR comment thread (overview or file-level) | (PR, comment) | When the comment was posted | The comment's author |
+| **PR reviewer assignment** | You are added as a reviewer on a PR | Each "added as reviewer" event | When you were added as reviewer | The person who added you |
+
+### Common rules
+
+- **Self-actions are skipped.** Assignments you make to yourself, comments you post that mention yourself, PRs where you add yourself as a reviewer — none generate a notification.
+- **List is capped.** The popup holds up to 500 notifications across all types; oldest are evicted as new ones arrive.
+- **Read state is preserved.** Marked-read notifications remain in the list (and can be toggled back to unread) until they're evicted.
+- **First-install lookback is short.** When you first add an organization, the extension does *not* backfill all of history — it only picks up activity within a recent window (a few days for PRs and the last 30 days for work item @mentions, per ADO's `@recentMentions` macro). For assignments, the extension silently captures everything currently assigned to you on first poll without notifying, and only fires notifications for changes after that point.
+
+### Known limitation: rapid reassignment within a single poll
+
+Detection compares snapshots between polls. If you're already assigned to a work item, then within a single poll interval (default 5 minutes) get reassigned away and reassigned back to yourself, the back-and-forth completes inside one snapshot window and produces no new notification. Reassignment cycles that span at least one poll boundary are detected normally.
 
 ## Installation
 

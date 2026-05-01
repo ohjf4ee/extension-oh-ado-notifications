@@ -255,87 +255,209 @@ export async function detectWorkItemMentions(apiClient, currentUser) {
 }
 
 /**
- * Detects work items assigned to the current user.
+ * Returns true if an identity-typed field value (an `IdentityRef` object, or
+ * the string form `"Display Name <email>"`) refers to the given user.
+ */
+function identityValueMatchesUser(value, currentUser) {
+  if (!value) return false;
+
+  // ADO usually serializes update field values as strings, but defensively
+  // accept the IdentityRef object form too.
+  if (typeof value === 'object') {
+    if (value.id && currentUser.id && value.id === currentUser.id) return true;
+    if (value.uniqueName && currentUser.emailAddress &&
+        value.uniqueName.toLowerCase() === currentUser.emailAddress.toLowerCase()) {
+      return true;
+    }
+    return false;
+  }
+
+  if (typeof value !== 'string') return false;
+
+  const emailMatch = value.match(/<([^>]+)>/);
+  if (emailMatch && currentUser.emailAddress) {
+    return emailMatch[1].toLowerCase() === currentUser.emailAddress.toLowerCase();
+  }
+
+  if (currentUser.displayName) {
+    const lowerValue = value.toLowerCase();
+    const lowerName = currentUser.displayName.toLowerCase();
+    if (lowerValue === lowerName || lowerValue.startsWith(lowerName + ' ')) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Walks a work item's update history backward and finds the most recent
+ * revision where `System.AssignedTo` was changed to the current user.
+ *
+ * @returns {{ revisedDate: string, revisedBy: Object } | null}
+ */
+function findAssignmentToUser(updates, currentUser) {
+  // The /updates response is generally chronological, but sort defensively.
+  const sorted = [...updates].sort((a, b) =>
+    new Date(b.revisedDate) - new Date(a.revisedDate)
+  );
+
+  for (const update of sorted) {
+    const change = update.fields?.['System.AssignedTo'];
+    if (!change) continue;
+    if (!identityValueMatchesUser(change.newValue, currentUser)) continue;
+
+    return {
+      revisedDate: update.revisedDate,
+      revisedBy: update.revisedBy,
+    };
+  }
+
+  return null;
+}
+
+/**
+ * Detects newly-assigned work items for the current user.
+ *
+ * Uses set-based diffing: compares the current "items assigned to me" set
+ * against the set seen on the previous poll. Only items that newly entered
+ * the set are candidates; their actual assignment date and assigner come
+ * from the work item's revision history (System.AssignedTo change events),
+ * not from System.ChangedDate / System.ChangedBy (which reflect any edit).
  *
  * @param {AdoApiClient} apiClient - Authenticated API client
  * @param {Object} currentUser - Current user info from apiClient.getCurrentUser()
- * @param {string|null} lastCheckTime - ISO timestamp of last check (null for first run)
- * @returns {Promise<{assignments: Array, warnings: string[]}>} Assignment notification records with warnings
+ * @param {number[]|null} previousAssignedIds
+ *   The set of work item IDs known to be assigned to the user as of the
+ *   previous poll. `null` signals "no prior poll for this org" — in that
+ *   case no notifications are produced; the current set is recorded so
+ *   subsequent polls can diff against it.
+ * @returns {Promise<{ assignments: Array, newAssignedIds: number[], warnings: string[] }>}
  */
-export async function detectWorkItemAssignments(apiClient, currentUser, lastCheckTime = null) {
-  // Build the date filter clause
-  // WIQL only accepts date-only values (no time), so convert ISO timestamp to date
-  let sinceClause;
-  if (lastCheckTime) {
-    // Extract just the date portion (YYYY-MM-DD) from ISO timestamp
-    const dateOnly = lastCheckTime.split('T')[0];
-    sinceClause = `AND [System.ChangedDate] >= '${dateOnly}'`;
-  } else {
-    // On first run, look back 2 days
-    sinceClause = `AND [System.ChangedDate] >= @Today - 2`;
-  }
+export async function detectWorkItemAssignments(apiClient, currentUser, previousAssignedIds = null) {
+  const warnings = [];
 
+  // P1: broad WIQL, IDs only.
   const wiql = `
-    SELECT [System.Id], [System.Title], [System.TeamProject],
-           [System.AssignedTo], [System.ChangedDate], [System.WorkItemType],
-           [System.ChangedBy]
+    SELECT [System.Id]
     FROM workitems
     WHERE [System.AssignedTo] = @Me
-      ${sinceClause}
-    ORDER BY [System.ChangedDate] DESC
   `;
 
-  const warnings = [];
   let workItemRefs;
   try {
     workItemRefs = await apiClient.executeWiql(wiql);
   } catch (error) {
     console.error('Error querying assigned work items:', error);
     warnings.push(`Assignment query failed: ${error.message || 'WIQL error'}`);
-    return { assignments: [], warnings };
+    return {
+      assignments: [],
+      // On query failure, preserve whatever the caller already had so we don't
+      // re-seed and miss real transitions on the next successful poll.
+      newAssignedIds: previousAssignedIds || [],
+      warnings,
+    };
   }
 
-  if (workItemRefs.length === 0) {
-    return { assignments: [], warnings };
+  // P2: build current set.
+  const currentIds = workItemRefs.map(wi => wi.id);
+
+  // P3 + P4: first poll for this org → silent seed, no notifications.
+  if (previousAssignedIds === null || previousAssignedIds === undefined) {
+    return {
+      assignments: [],
+      newAssignedIds: currentIds,
+      warnings,
+    };
   }
 
-  // Batch fetch work item details
-  const workItemIds = workItemRefs.map(wi => wi.id);
-  const allWorkItems = [];
+  // P5: items in currentSet that were not in previousSet.
+  const previousSet = new Set(previousAssignedIds);
+  const addedIds = currentIds.filter(id => !previousSet.has(id));
 
-  for (let i = 0; i < workItemIds.length; i += API_CONFIG.maxWorkItemsPerBatch) {
-    const batchIds = workItemIds.slice(i, i + API_CONFIG.maxWorkItemsPerBatch);
+  if (addedIds.length === 0) {
+    return {
+      assignments: [],
+      newAssignedIds: currentIds,
+      warnings,
+    };
+  }
+
+  // P6: batch-fetch details for added IDs only.
+  const addedWorkItems = [];
+  for (let i = 0; i < addedIds.length; i += API_CONFIG.maxWorkItemsPerBatch) {
+    const batchIds = addedIds.slice(i, i + API_CONFIG.maxWorkItemsPerBatch);
     try {
       const batchItems = await apiClient.getWorkItems(batchIds, [
         'System.Id',
         'System.Title',
         'System.TeamProject',
-        'System.AssignedTo',
-        'System.ChangedDate',
         'System.WorkItemType',
+        // ChangedDate / ChangedBy are only used as a defensive fallback when
+        // the revisions lookup can't identify an assignment-to-me event.
+        'System.ChangedDate',
         'System.ChangedBy',
       ]);
-      allWorkItems.push(...batchItems);
+      addedWorkItems.push(...batchItems);
     } catch (error) {
-      console.error(`Error fetching assignment batch starting at ${batchIds[0]}:`, error);
+      console.error(`Error fetching new-assignment batch starting at ${batchIds[0]}:`, error);
       warnings.push(`Assignment batch #${batchIds[0]}: ${error.message || 'fetch failed'}`);
     }
   }
 
+  // P7 + P8: for each added item, fetch revisions, identify the actual
+  // assignment event, decide whether to notify, build the mention.
   const assignments = [];
+  for (const workItem of addedWorkItems) {
+    let revisedDate;
+    let revisedBy;
 
-  for (const workItem of allWorkItems) {
-    const projectName = workItem.fields['System.TeamProject'];
-    const changedBy = workItem.fields['System.ChangedBy'];
+    try {
+      const updates = await apiClient.getWorkItemUpdates(workItem.id);
+      const found = findAssignmentToUser(updates, currentUser);
+      if (found) {
+        revisedDate = found.revisedDate;
+        revisedBy = found.revisedBy;
+      } else {
+        // P7c: shouldn't happen — WIQL says you're assigned, but the revisions
+        // didn't show a transition to you. Fall back to the work item's most
+        // recent edit so we still produce something usable.
+        console.warn(`No assignment-to-me revision found for #${workItem.id}; falling back to ChangedDate/ChangedBy`);
+        warnings.push(`Work item #${workItem.id}: no assignment revision found, using last-edit timestamp`);
+        revisedDate = workItem.fields['System.ChangedDate'];
+        revisedBy = workItem.fields['System.ChangedBy'];
+      }
+    } catch (error) {
+      console.error(`Error fetching revisions for #${workItem.id}:`, error);
+      warnings.push(`Revisions for #${workItem.id}: ${error.message || 'fetch failed'}`);
+      revisedDate = workItem.fields['System.ChangedDate'];
+      revisedBy = workItem.fields['System.ChangedBy'];
+    }
 
-    // Skip if the user assigned it to themselves
-    if (changedBy?.uniqueName?.toLowerCase() === currentUser.emailAddress?.toLowerCase() ||
-        changedBy?.id === currentUser.id) {
+    // P8a: skip self-assignment. Item is still tracked in newAssignedIds.
+    if (revisedBy && (
+      revisedBy.id === currentUser.id ||
+      (revisedBy.uniqueName && currentUser.emailAddress &&
+        revisedBy.uniqueName.toLowerCase() === currentUser.emailAddress.toLowerCase())
+    )) {
       continue;
     }
 
+    const mentionedBy = revisedBy ? {
+      displayName: revisedBy.displayName || 'Unknown',
+      uniqueName: revisedBy.uniqueName || '',
+      imageUrl: revisedBy.imageUrl || null,
+    } : {
+      displayName: 'Unknown',
+      uniqueName: '',
+      imageUrl: null,
+    };
+
+    const projectName = workItem.fields['System.TeamProject'];
     assignments.push({
-      id: createMentionId(apiClient.orgUrl, 'workitem', workItem.id, 'assignment'),
+      // P8b: include revisedDate in the ID so a true reassignment after a gap
+      // produces a new notification rather than colliding with a previous one.
+      id: createMentionId(apiClient.orgUrl, 'workitem', workItem.id, `assignment:${revisedDate}`),
       orgUrl: apiClient.orgUrl,
       orgName: apiClient.orgName,
       type: 'workitem',
@@ -348,23 +470,19 @@ export async function detectWorkItemAssignments(apiClient, currentUser, lastChec
       commentId: null,
       commentHtml: null,
       commentPreview: 'You were assigned this work item',
-      mentionedBy: changedBy ? {
-        displayName: changedBy.displayName || 'Unknown',
-        uniqueName: changedBy.uniqueName || '',
-        imageUrl: changedBy.imageUrl || null,
-      } : {
-        displayName: 'Unknown',
-        uniqueName: '',
-        imageUrl: null,
-      },
-      timestamp: workItem.fields['System.ChangedDate'],
+      mentionedBy,
+      timestamp: revisedDate,
       url: buildWorkItemCommentUrl(apiClient.orgUrl, projectName, workItem.id, null),
       userCommentedAfter: false,
       userReplyPreview: null,
     });
   }
 
-  return { assignments, warnings };
+  return {
+    assignments,
+    newAssignedIds: currentIds,
+    warnings,
+  };
 }
 
 /**
@@ -679,8 +797,15 @@ export async function detectPRMentions(apiClient, currentUser, options = {}) {
  * @param {boolean} [options.includeAssignments=true] - Include assignments
  * @param {string|null} [options.lastPRPollTime] - ISO timestamp of last PR poll
  * @param {Object} [options.prThreadCache] - PR thread cache
- * @param {string|null} [options.lastAssignmentCheckTime] - ISO timestamp of last assignment check
- * @returns {Promise<{mentions: Mention[], prResult: Object|null, warnings: string[]}>}
+ * @param {number[]|null} [options.previousAssignedIds]
+ *   The set of work item IDs known to be assigned to the user as of the
+ *   previous poll. `null` triggers a silent seed (no assignment notifications).
+ * @returns {Promise<{
+ *   mentions: Mention[],
+ *   prResult: Object|null,
+ *   assignmentResult: { newAssignedIds: number[] }|null,
+ *   warnings: string[]
+ * }>}
  */
 export async function detectMentions(apiClient, options = {}) {
   const {
@@ -689,7 +814,7 @@ export async function detectMentions(apiClient, options = {}) {
     includeAssignments = true,
     lastPRPollTime = null,
     prThreadCache = {},
-    lastAssignmentCheckTime = null,
+    previousAssignedIds = null,
   } = options;
 
   // Get current user once and pass to all detection functions
@@ -698,6 +823,7 @@ export async function detectMentions(apiClient, options = {}) {
   const allMentions = [];
   const allWarnings = [];
   let prResult = null;
+  let assignmentResult = null;
 
   // Work item @mentions (uses @recentMentions WIQL)
   if (includeWorkItems) {
@@ -706,11 +832,13 @@ export async function detectMentions(apiClient, options = {}) {
     allWarnings.push(...wiResult.warnings);
   }
 
-  // Work item assignments
+  // Work item assignments (set-based diff over the user's currently-assigned
+  // items, with revisions used to identify the actual assignment event).
   if (includeAssignments) {
-    const assignResult = await detectWorkItemAssignments(apiClient, currentUser, lastAssignmentCheckTime);
+    const assignResult = await detectWorkItemAssignments(apiClient, currentUser, previousAssignedIds);
     allMentions.push(...assignResult.assignments);
     allWarnings.push(...assignResult.warnings);
+    assignmentResult = { newAssignedIds: assignResult.newAssignedIds };
   }
 
   // PR @mentions and reviewer assignments
@@ -737,6 +865,7 @@ export async function detectMentions(apiClient, options = {}) {
   return {
     mentions: dedupedMentions,
     prResult,
+    assignmentResult,
     warnings: allWarnings,
   };
 }

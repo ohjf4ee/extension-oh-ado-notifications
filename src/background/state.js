@@ -16,12 +16,14 @@ export {
   updateOrganization,
   removeOrganization,
   clearAllData,
-  // PR poll state (batched)
+  // Poll state (batched)
   getPollState,
   updateLastPRPoll,
   savePRThreadCache,
-  // Assignment check state
-  updateLastAssignmentCheck,
+  // Assignment set state
+  saveAssignedWorkItemIds,
+  // One-time migration
+  runAssignmentDetectionMigration,
 } from '../storage.js';
 
 import { loadState, saveMentions } from '../storage.js';

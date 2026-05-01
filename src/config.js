@@ -11,7 +11,8 @@ export const STORAGE_KEYS = {
   PREFERENCES: 'ado_preferences',
   LAST_PR_POLL: 'ado_last_pr_poll',
   PR_THREAD_CACHE: 'ado_pr_thread_cache',
-  LAST_ASSIGNMENT_CHECK: 'ado_last_assign',
+  ASSIGNED_WORK_ITEM_IDS: 'ado_assigned_work_item_ids',
+  ASSIGNMENT_MIGRATION_DONE: 'ado_assignment_migration_done',
 };
 
 // Default preferences
