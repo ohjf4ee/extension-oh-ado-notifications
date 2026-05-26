@@ -22,9 +22,12 @@ export {
   savePRThreadCache,
   // Assignment set state
   saveAssignedWorkItemIds,
+  // Reviewer set state
+  saveReviewerPRIds,
   // One-time migrations
   runAssignmentDetectionMigration,
   runAssignmentSentinelCleanup,
+  runReviewerDetectionMigration,
 } from '../storage.js';
 
 import { loadState, saveMentions } from '../storage.js';

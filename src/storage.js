@@ -274,15 +274,18 @@ export async function removeOrganization(orgUrl) {
     STORAGE_KEYS.LAST_PR_POLL,
     STORAGE_KEYS.PR_THREAD_CACHE,
     STORAGE_KEYS.ASSIGNED_WORK_ITEM_IDS,
+    STORAGE_KEYS.REVIEWER_PR_IDS,
   ]);
 
   const lastPRPoll = perOrgData[STORAGE_KEYS.LAST_PR_POLL] || {};
   const prThreadCache = perOrgData[STORAGE_KEYS.PR_THREAD_CACHE] || {};
   const assignedIds = perOrgData[STORAGE_KEYS.ASSIGNED_WORK_ITEM_IDS] || {};
+  const reviewerIds = perOrgData[STORAGE_KEYS.REVIEWER_PR_IDS] || {};
 
   delete lastPRPoll[orgUrl];
   delete prThreadCache[orgUrl];
   delete assignedIds[orgUrl];
+  delete reviewerIds[orgUrl];
 
   await Promise.all([
     saveOrganizations(state.organizations),
@@ -292,6 +295,7 @@ export async function removeOrganization(orgUrl) {
       [STORAGE_KEYS.LAST_PR_POLL]: lastPRPoll,
       [STORAGE_KEYS.PR_THREAD_CACHE]: prThreadCache,
       [STORAGE_KEYS.ASSIGNED_WORK_ITEM_IDS]: assignedIds,
+      [STORAGE_KEYS.REVIEWER_PR_IDS]: reviewerIds,
     }),
   ]);
 
@@ -318,33 +322,41 @@ export async function getDecryptedPat(orgUrl) {
 
 /**
  * Gets all poll-related state for an organization in a single storage read.
- * This is more efficient than calling getLastPRPoll, getPRThreadCache, and
- * getAssignedWorkItemIds separately.
  *
  * @param {string} orgUrl - Organization URL
- * @returns {Promise<{lastPRPollTime: string|null, prThreadCache: Object, assignedWorkItemIds: number[]|null}>}
- *   `assignedWorkItemIds` is `null` if the org has never been polled (signals first-poll silent seed).
+ * @returns {Promise<{
+ *   lastPRPollTime: string|null,
+ *   prThreadCache: Object,
+ *   assignedWorkItemIds: number[]|null,
+ *   reviewerPRIds: number[]|null,
+ * }>}
+ *   `assignedWorkItemIds` / `reviewerPRIds` are `null` if the org has never
+ *   been polled — that triggers a silent seed instead of notifying for
+ *   everything currently in scope.
  */
 export async function getPollState(orgUrl) {
   const data = await chrome.storage.local.get([
     STORAGE_KEYS.LAST_PR_POLL,
     STORAGE_KEYS.PR_THREAD_CACHE,
     STORAGE_KEYS.ASSIGNED_WORK_ITEM_IDS,
+    STORAGE_KEYS.REVIEWER_PR_IDS,
   ]);
 
   const lastPRPoll = data[STORAGE_KEYS.LAST_PR_POLL] || {};
   const threadCache = data[STORAGE_KEYS.PR_THREAD_CACHE] || {};
   const assignedIds = data[STORAGE_KEYS.ASSIGNED_WORK_ITEM_IDS] || {};
+  const reviewerIds = data[STORAGE_KEYS.REVIEWER_PR_IDS] || {};
+
+  // hasOwnProperty preserves explicit empty arrays (meaning "polled, you're
+  // currently a reviewer/assignee on nothing"), distinguishing from `null`
+  // (meaning "never polled — do the silent seed").
+  const has = (m, k) => Object.prototype.hasOwnProperty.call(m, k);
 
   return {
     lastPRPollTime: lastPRPoll[orgUrl] || null,
     prThreadCache: threadCache[orgUrl] || {},
-    // Use Object.prototype.hasOwnProperty so an explicit empty array is preserved
-    // (empty array means "we polled and you're assigned to nothing"; null means
-    // "we've never polled this org, do a silent seed instead of notifying").
-    assignedWorkItemIds: Object.prototype.hasOwnProperty.call(assignedIds, orgUrl)
-      ? assignedIds[orgUrl]
-      : null,
+    assignedWorkItemIds: has(assignedIds, orgUrl) ? assignedIds[orgUrl] : null,
+    reviewerPRIds: has(reviewerIds, orgUrl) ? reviewerIds[orgUrl] : null,
   };
 }
 
@@ -388,6 +400,21 @@ export async function saveAssignedWorkItemIds(orgUrl, ids) {
   all[orgUrl] = ids;
   await chrome.storage.local.set({
     [STORAGE_KEYS.ASSIGNED_WORK_ITEM_IDS]: all,
+  });
+}
+
+/**
+ * Saves the per-org set of PR IDs where the user is currently a reviewer.
+ *
+ * @param {string} orgUrl - Organization URL
+ * @param {number[]} ids - Pull request IDs the user is currently a reviewer on
+ */
+export async function saveReviewerPRIds(orgUrl, ids) {
+  const data = await chrome.storage.local.get(STORAGE_KEYS.REVIEWER_PR_IDS);
+  const all = data[STORAGE_KEYS.REVIEWER_PR_IDS] || {};
+  all[orgUrl] = ids;
+  await chrome.storage.local.set({
+    [STORAGE_KEYS.REVIEWER_PR_IDS]: all,
   });
 }
 
@@ -494,5 +521,45 @@ export async function runAssignmentSentinelCleanup() {
   });
 
   console.log(`Assignment sentinel cleanup: removed ${removed} bad-timestamp assignment mentions`);
+  return { ran: true, removed };
+}
+
+/**
+ * Wipes existing PR reviewer-assignment notifications so the new set-diff
+ * detector can re-discover them with corrected timestamps and IDs.
+ *
+ * Pre-migration these notifications used `pr.creationDate` as the timestamp
+ * and `pr.createdBy` as `mentionedBy`, and had an ID of `…:reviewer` (no
+ * timestamp suffix — so re-adds after removal would collide and never fire
+ * a new notification). The new ID includes a timestamp suffix.
+ *
+ * Leaves `REVIEWER_PR_IDS` undefined per org so the first poll silent-seeds
+ * (no flurry of "added as reviewer" notifications for PRs you already know
+ * you're on).
+ *
+ * Idempotent via a flag.
+ */
+export async function runReviewerDetectionMigration() {
+  const data = await chrome.storage.local.get([
+    STORAGE_KEYS.REVIEWER_DETECTION_MIGRATION_DONE,
+    STORAGE_KEYS.MENTIONS,
+  ]);
+
+  if (data[STORAGE_KEYS.REVIEWER_DETECTION_MIGRATION_DONE]) {
+    return { ran: false };
+  }
+
+  const mentions = data[STORAGE_KEYS.MENTIONS] || [];
+  const filtered = mentions.filter(m =>
+    !(m.subtype === 'assignment' && m.type === 'pullrequest')
+  );
+  const removed = mentions.length - filtered.length;
+
+  await chrome.storage.local.set({
+    [STORAGE_KEYS.MENTIONS]: filtered,
+    [STORAGE_KEYS.REVIEWER_DETECTION_MIGRATION_DONE]: true,
+  });
+
+  console.log(`Reviewer detection migration: removed ${removed} legacy PR reviewer mentions`);
   return { ran: true, removed };
 }

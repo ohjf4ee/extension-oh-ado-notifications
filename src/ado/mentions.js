@@ -616,41 +616,48 @@ async function extractMentionsFromPR(apiClient, pr, currentUser, threadCache, cu
 }
 
 /**
- * Checks if user is a reviewer on a PR and creates a partial notification object.
- * Returns null if user is not a reviewer or shouldn't be notified.
- * Caller must set id, orgUrl, orgName, and url fields.
+ * Returns the user's reviewer entry on a PR if they are currently a non-author
+ * reviewer, otherwise null. Used to maintain the per-poll reviewer set.
  */
-function checkReviewerAssignment(pr, currentUser, cutoffTime) {
-  // Check if the PR was created after our cutoff
-  const prCreatedTime = new Date(pr.creationDate).getTime();
-  if (cutoffTime && prCreatedTime < cutoffTime) {
-    return null;
-  }
-
-  // Find the user's reviewer entry (if any)
+function findUserReviewerEntry(pr, currentUser) {
   const reviewers = pr.reviewers || [];
-  const userReviewerEntry = reviewers.find(r =>
+  const entry = reviewers.find(r =>
     r.id === currentUser.id ||
     r.uniqueName?.toLowerCase() === currentUser.emailAddress?.toLowerCase()
   );
+  if (!entry) return null;
 
-  if (!userReviewerEntry) {
-    return null;
-  }
+  // Skip if user is the PR author (they wouldn't add themselves as reviewer
+  // normally; the reviewer entry that ADO auto-adds for authors doesn't
+  // count as "you were added by someone").
+  const isAuthor =
+    pr.createdBy?.id === currentUser.id ||
+    pr.createdBy?.uniqueName?.toLowerCase() === currentUser.emailAddress?.toLowerCase();
+  if (isAuthor) return null;
 
-  // Skip if user is the PR author (they wouldn't add themselves as reviewer normally)
-  if (pr.createdBy?.id === currentUser.id ||
-      pr.createdBy?.uniqueName?.toLowerCase() === currentUser.emailAddress?.toLowerCase()) {
-    return null;
-  }
+  return entry;
+}
 
+/**
+ * Builds a reviewer-assignment notification for a PR the user was newly added
+ * to as a reviewer.
+ *
+ * Timestamp uses `pr.lastUpdatedDate` (the time of the most recent change on
+ * the PR, which is close to "when the add happened" when set-diff triggers).
+ * Attribution uses `pr.createdBy` as a best-effort signal — ADO's PR threads
+ * don't always surface a "X added Y as reviewer" event we can read.
+ */
+function buildReviewerAssignmentMention(apiClient, pr, reviewerEntry) {
   const projectName = pr.repository.project.name;
   const repositoryName = pr.repository.name;
-  const isRequired = userReviewerEntry.isRequired === true;
+  const isRequired = reviewerEntry.isRequired === true;
   const reviewerType = isRequired ? 'a required reviewer' : 'an optional reviewer';
+  const timestamp = pr.lastUpdatedDate || pr.creationDate;
 
-  // Return partial object - caller will set id, orgUrl, orgName, and url
   return {
+    id: createMentionId(apiClient.orgUrl, 'pullrequest', pr.pullRequestId, `reviewer:${timestamp}`),
+    orgUrl: apiClient.orgUrl,
+    orgName: apiClient.orgName,
     type: 'pullrequest',
     subtype: 'assignment',
     itemId: pr.pullRequestId,
@@ -666,7 +673,8 @@ function checkReviewerAssignment(pr, currentUser, cutoffTime) {
       uniqueName: pr.createdBy?.uniqueName || '',
       imageUrl: pr.createdBy?.imageUrl || null,
     },
-    timestamp: pr.creationDate,
+    timestamp,
+    url: buildPRCommentUrl(apiClient.orgUrl, projectName, repositoryName, pr.pullRequestId, { isOverview: true }),
     userCommentedAfter: false,
     userReplyPreview: null,
   };
@@ -675,14 +683,25 @@ function checkReviewerAssignment(pr, currentUser, cutoffTime) {
 /**
  * Detects PR mentions and reviewer assignments.
  *
+ * Reviewer assignments use set-based diffing: we maintain a per-org set of
+ * PR IDs where the user is currently a non-author reviewer, and only fire
+ * notifications for PRs that newly enter the set. `previousReviewerPRIds`
+ * being `null` triggers a silent seed (no reviewer-assignment notifications
+ * for PRs you're already on at first poll).
+ *
  * @param {AdoApiClient} apiClient - Authenticated API client
  * @param {Object} currentUser - Current user info from apiClient.getCurrentUser()
  * @param {Object} options - Detection options
- * @param {number} [options.lookbackMs] - Lookback time in ms for first run (default 2 days)
+ * @param {number} [options.lookbackMs] - Lookback time in ms for first run (default 7 days, applied to @mention scanning only)
  * @param {string|null} [options.lastPRPollTime] - ISO timestamp of last PR poll
  * @param {Object} [options.threadCache] - { prId: maxLastUpdatedDate } map
  * @param {boolean} [options.includeReviewerAssignments] - Include reviewer assignment notifications
- * @returns {Promise<{mentions: Array, newLastPollTime: string, newThreadCache: Object}>}
+ * @param {number[]|null} [options.previousReviewerPRIds]
+ *   The set of PR IDs known to have the user as a reviewer as of the previous
+ *   poll. `null` signals "no prior poll for this org" — no reviewer
+ *   notifications produced; the current set is recorded so the next poll can
+ *   diff against it.
+ * @returns {Promise<{mentions: Array, newLastPollTime: string, newThreadCache: Object, newReviewerPRIds: number[]|null, warnings: string[]}>}
  */
 export async function detectPRMentions(apiClient, currentUser, options = {}) {
   const {
@@ -690,9 +709,10 @@ export async function detectPRMentions(apiClient, currentUser, options = {}) {
     lastPRPollTime = null,
     threadCache = {},
     includeReviewerAssignments = true,
+    previousReviewerPRIds = null,
   } = options;
 
-  // Determine cutoff time
+  // Determine cutoff time (used for @mention scanning, not reviewer detection)
   let cutoffTime;
   if (lastPRPollTime) {
     cutoffTime = new Date(lastPRPollTime).getTime();
@@ -708,12 +728,24 @@ export async function detectPRMentions(apiClient, currentUser, options = {}) {
   } catch (error) {
     console.error('Error listing projects:', error);
     warnings.push(`Failed to list projects: ${error.message || 'API error'}`);
-    return { mentions: [], newLastPollTime: new Date().toISOString(), newThreadCache: threadCache, warnings };
+    return {
+      mentions: [],
+      newLastPollTime: new Date().toISOString(),
+      newThreadCache: threadCache,
+      // On project-list failure preserve the previous set so we don't re-seed
+      // and miss the next genuine reviewer-add.
+      newReviewerPRIds: previousReviewerPRIds,
+      warnings,
+    };
   }
 
   const allMentions = [];
   const newThreadCache = { ...threadCache };
   const seenPRIds = new Set();
+  // PR IDs where the user is currently a non-author reviewer, collected as
+  // we walk each project. Used for the reviewer-assignment set diff at the end.
+  const currentReviewerPRSet = new Set();
+  const currentReviewerEntries = new Map(); // prId -> { pr, reviewerEntry }
 
   // TODO: Projects are processed sequentially to avoid overwhelming the API.
   // For organizations with many projects, this may be slow. Consider:
@@ -764,22 +796,13 @@ export async function detectPRMentions(apiClient, currentUser, options = {}) {
           newThreadCache[pr.pullRequestId] = result.maxDate;
         }
 
-        // Check for reviewer assignment
+        // Collect this PR into the current-reviewer set; the set diff after
+        // the project loop decides whether to fire a notification.
         if (includeReviewerAssignments) {
-          const reviewerMention = checkReviewerAssignment(pr, currentUser, cutoffTime);
-          if (reviewerMention) {
-            // Complete the partial object with org-specific fields
-            reviewerMention.id = createMentionId(apiClient.orgUrl, 'pullrequest', pr.pullRequestId, 'reviewer');
-            reviewerMention.orgUrl = apiClient.orgUrl;
-            reviewerMention.orgName = apiClient.orgName;
-            reviewerMention.url = buildPRCommentUrl(
-              apiClient.orgUrl,
-              reviewerMention.projectName,
-              reviewerMention.repositoryName,
-              pr.pullRequestId,
-              { isOverview: true }
-            );
-            allMentions.push(reviewerMention);
+          const reviewerEntry = findUserReviewerEntry(pr, currentUser);
+          if (reviewerEntry) {
+            currentReviewerPRSet.add(pr.pullRequestId);
+            currentReviewerEntries.set(pr.pullRequestId, { pr, reviewerEntry });
           }
         }
       }
@@ -797,10 +820,28 @@ export async function detectPRMentions(apiClient, currentUser, options = {}) {
     }
   }
 
+  // Reviewer-assignment set diff. On a silent seed (previousReviewerPRIds is
+  // null) we record the current set without producing any notifications, so
+  // a brand-new org doesn't flood the popup with "added as reviewer" entries
+  // for every PR you're already on.
+  const currentReviewerIds = [...currentReviewerPRSet];
+  let newReviewerPRIds = currentReviewerIds;
+  if (includeReviewerAssignments &&
+      previousReviewerPRIds !== null && previousReviewerPRIds !== undefined) {
+    const previousSet = new Set(previousReviewerPRIds);
+    const addedIds = currentReviewerIds.filter(id => !previousSet.has(id));
+    for (const prId of addedIds) {
+      const entry = currentReviewerEntries.get(prId);
+      if (!entry) continue;
+      allMentions.push(buildReviewerAssignmentMention(apiClient, entry.pr, entry.reviewerEntry));
+    }
+  }
+
   return {
     mentions: allMentions,
     newLastPollTime: new Date().toISOString(),
     newThreadCache,
+    newReviewerPRIds,
     warnings,
   };
 }
@@ -818,12 +859,16 @@ export async function detectPRMentions(apiClient, currentUser, options = {}) {
  * @param {number[]|null} [options.previousAssignedIds]
  *   The set of work item IDs known to be assigned to the user as of the
  *   previous poll. `null` triggers a silent seed (no assignment notifications).
+ * @param {number[]|null} [options.previousReviewerPRIds]
+ *   The set of PR IDs known to have the user as a reviewer as of the previous
+ *   poll. `null` triggers a silent seed (no reviewer-assignment notifications).
  * @returns {Promise<{
  *   mentions: Mention[],
  *   prResult: Object|null,
  *   assignmentResult: { newAssignedIds: number[] }|null,
  *   warnings: string[]
  * }>}
+ *   `prResult.newReviewerPRIds` carries the updated reviewer set.
  */
 export async function detectMentions(apiClient, options = {}) {
   const {
@@ -833,6 +878,7 @@ export async function detectMentions(apiClient, options = {}) {
     lastPRPollTime = null,
     prThreadCache = {},
     previousAssignedIds = null,
+    previousReviewerPRIds = null,
   } = options;
 
   // Get current user once and pass to all detection functions
@@ -865,6 +911,7 @@ export async function detectMentions(apiClient, options = {}) {
       lastPRPollTime,
       threadCache: prThreadCache,
       includeReviewerAssignments: includeAssignments,
+      previousReviewerPRIds,
     });
     allMentions.push(...prResult.mentions);
     allWarnings.push(...prResult.warnings);

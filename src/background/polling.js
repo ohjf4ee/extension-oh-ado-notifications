@@ -16,6 +16,7 @@ import {
   updateLastPRPoll,
   savePRThreadCache,
   saveAssignedWorkItemIds,
+  saveReviewerPRIds,
 } from './state.js';
 import { updateBadge, dispatchNotifications } from './notifications.js';
 
@@ -124,6 +125,7 @@ export async function pollOrganization(org) {
       lastPRPollTime: pollState.lastPRPollTime,
       prThreadCache: pollState.prThreadCache,
       previousAssignedIds: pollState.assignedWorkItemIds,
+      previousReviewerPRIds: pollState.reviewerPRIds,
     });
 
     // Load current state and merge mentions
@@ -145,6 +147,9 @@ export async function pollOrganization(org) {
     if (result.prResult) {
       await updateLastPRPoll(org.orgUrl, result.prResult.newLastPollTime);
       await savePRThreadCache(org.orgUrl, result.prResult.newThreadCache);
+      if (result.prResult.newReviewerPRIds) {
+        await saveReviewerPRIds(org.orgUrl, result.prResult.newReviewerPRIds);
+      }
     }
 
     // Handle partial failures (warnings) or clear previous errors

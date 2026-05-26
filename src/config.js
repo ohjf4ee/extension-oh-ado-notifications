@@ -14,6 +14,8 @@ export const STORAGE_KEYS = {
   ASSIGNED_WORK_ITEM_IDS: 'ado_assigned_work_item_ids',
   ASSIGNMENT_MIGRATION_DONE: 'ado_assignment_migration_done',
   ASSIGNMENT_SENTINEL_CLEANUP_DONE: 'ado_assignment_sentinel_cleanup_done',
+  REVIEWER_PR_IDS: 'ado_reviewer_pr_ids',
+  REVIEWER_DETECTION_MIGRATION_DONE: 'ado_reviewer_detection_migration_done',
 };
 
 // Default preferences
