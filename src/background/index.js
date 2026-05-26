@@ -11,7 +11,7 @@
 import { schedulePolling, setupAlarmHandler } from './polling.js';
 import { setupMessageHandler } from './messages.js';
 import { setupNotificationClickHandler, setupBlinkAlarmHandler, updateBadge, stopBadgeBlink } from './notifications.js';
-import { loadState, runAssignmentDetectionMigration } from './state.js';
+import { loadState, runAssignmentDetectionMigration, runAssignmentSentinelCleanup } from './state.js';
 
 /**
  * Initializes the background service.
@@ -33,6 +33,7 @@ export function initializeBackgroundService() {
 
     // Run any pending one-time migrations before scheduling polls.
     await runAssignmentDetectionMigration();
+    await runAssignmentSentinelCleanup();
 
     // Initialize badge
     await updateBadge();
@@ -47,6 +48,7 @@ export function initializeBackgroundService() {
 
     // Run any pending one-time migrations before scheduling polls.
     await runAssignmentDetectionMigration();
+    await runAssignmentSentinelCleanup();
 
     // Restore badge state
     await updateBadge();

@@ -433,3 +433,66 @@ export async function runAssignmentDetectionMigration() {
   console.log(`Assignment detection migration: removed ${removed} legacy assignment mentions`);
   return { ran: true, removed };
 }
+
+/**
+ * Cleans up assignment notifications whose `timestamp` ended up as ADO's
+ * `9999-01-01T00:00:00Z` sentinel (or any other implausibly-future date).
+ *
+ * Pre-fix, the matcher could pick a synthetic current-state revision returned
+ * by `/updates` with that sentinel revisedDate, leading to a stored timestamp
+ * in the year 9999 — which sorted to the top of the popup and rendered as
+ * "just now".
+ *
+ * Removes the broken notifications and strips their work item IDs from
+ * `assignedWorkItemIds` for the owning org so the next poll will treat them
+ * as new transitions and re-create the notifications with correct timestamps.
+ *
+ * Idempotent via a dedicated flag.
+ */
+export async function runAssignmentSentinelCleanup() {
+  const data = await chrome.storage.local.get([
+    STORAGE_KEYS.ASSIGNMENT_SENTINEL_CLEANUP_DONE,
+    STORAGE_KEYS.MENTIONS,
+    STORAGE_KEYS.ASSIGNED_WORK_ITEM_IDS,
+  ]);
+
+  if (data[STORAGE_KEYS.ASSIGNMENT_SENTINEL_CLEANUP_DONE]) {
+    return { ran: false };
+  }
+
+  const mentions = data[STORAGE_KEYS.MENTIONS] || [];
+  const assignedIds = data[STORAGE_KEYS.ASSIGNED_WORK_ITEM_IDS] || {};
+
+  const isBadTimestamp = (ts) => {
+    const t = new Date(ts).getTime();
+    return isNaN(t) || t > Date.now() + 365 * 24 * 60 * 60 * 1000;
+  };
+
+  // Identify bad assignment notifications and the (orgUrl, itemId) pairs to
+  // strip from each org's assigned-set so the next poll re-detects them.
+  const badByOrg = {};
+  const filtered = mentions.filter(m => {
+    if (m.subtype !== 'assignment') return true;
+    if (!isBadTimestamp(m.timestamp)) return true;
+    if (m.orgUrl && m.itemId != null) {
+      (badByOrg[m.orgUrl] = badByOrg[m.orgUrl] || new Set()).add(m.itemId);
+    }
+    return false;
+  });
+  const removed = mentions.length - filtered.length;
+
+  for (const orgUrl of Object.keys(badByOrg)) {
+    const current = assignedIds[orgUrl];
+    if (!Array.isArray(current)) continue;
+    assignedIds[orgUrl] = current.filter(id => !badByOrg[orgUrl].has(id));
+  }
+
+  await chrome.storage.local.set({
+    [STORAGE_KEYS.MENTIONS]: filtered,
+    [STORAGE_KEYS.ASSIGNED_WORK_ITEM_IDS]: assignedIds,
+    [STORAGE_KEYS.ASSIGNMENT_SENTINEL_CLEANUP_DONE]: true,
+  });
+
+  console.log(`Assignment sentinel cleanup: removed ${removed} bad-timestamp assignment mentions`);
+  return { ran: true, removed };
+}

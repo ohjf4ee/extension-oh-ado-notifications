@@ -22,8 +22,9 @@ export {
   savePRThreadCache,
   // Assignment set state
   saveAssignedWorkItemIds,
-  // One-time migration
+  // One-time migrations
   runAssignmentDetectionMigration,
+  runAssignmentSentinelCleanup,
 } from '../storage.js';
 
 import { loadState, saveMentions } from '../storage.js';

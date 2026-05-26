@@ -13,6 +13,7 @@ export const STORAGE_KEYS = {
   PR_THREAD_CACHE: 'ado_pr_thread_cache',
   ASSIGNED_WORK_ITEM_IDS: 'ado_assigned_work_item_ids',
   ASSIGNMENT_MIGRATION_DONE: 'ado_assignment_migration_done',
+  ASSIGNMENT_SENTINEL_CLEANUP_DONE: 'ado_assignment_sentinel_cleanup_done',
 };
 
 // Default preferences

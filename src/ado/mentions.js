@@ -291,6 +291,21 @@ function identityValueMatchesUser(value, currentUser) {
 }
 
 /**
+ * Returns true if a revisedDate is a real historical date — not ADO's
+ * `9999-01-01T00:00:00Z` sentinel (used to flag the current/not-yet-superseded
+ * revision) and not any other implausibly-future date. Some responses include
+ * a synthetic current-state entry with the sentinel revisedDate; if that entry
+ * happens to carry a `System.AssignedTo` value we must not treat it as the
+ * actual assignment event, or the stored timestamp ends up in the year 9999.
+ */
+function isRealRevisedDate(revisedDate) {
+  const t = new Date(revisedDate).getTime();
+  if (isNaN(t)) return false;
+  // Anything more than a year ahead of "now" is treated as a sentinel.
+  return t < Date.now() + 365 * 24 * 60 * 60 * 1000;
+}
+
+/**
  * Walks a work item's update history backward and finds the most recent
  * revision where `System.AssignedTo` was changed to the current user.
  *
@@ -298,9 +313,12 @@ function identityValueMatchesUser(value, currentUser) {
  */
 function findAssignmentToUser(updates, currentUser) {
   // The /updates response is generally chronological, but sort defensively.
-  const sorted = [...updates].sort((a, b) =>
-    new Date(b.revisedDate) - new Date(a.revisedDate)
-  );
+  // Filter out ADO's sentinel "current state" entry (revisedDate 9999-01-01)
+  // before sorting — it would otherwise sort first by date and could carry a
+  // synthetic System.AssignedTo value that fools the matcher.
+  const sorted = updates
+    .filter(u => isRealRevisedDate(u.revisedDate))
+    .sort((a, b) => new Date(b.revisedDate) - new Date(a.revisedDate));
 
   for (const update of sorted) {
     const change = update.fields?.['System.AssignedTo'];
